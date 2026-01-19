@@ -1,0 +1,16 @@
+This software uses the following third-party libraries:
+
+- Python
+  Python Software Foundation License
+
+- Pillow
+  HPND License
+
+- pytesseract
+  Apache License 2.0
+
+- Tesseract OCR
+  Apache License 2.0
+
+- pystray
+  MIT License
