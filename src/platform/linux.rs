@@ -89,7 +89,7 @@ where
     let tray = (|| {
         let mut t = TrayItem::new(
             "KCO Relay Server",
-            tray_item::IconSource::IconName("audio-x-generic"),
+            tray_item::IconSource::Resource("audio-x-generic"),
         )
         .ok()?;
         t.add_menu_item("表示 (Show)", on_show).ok()?;
