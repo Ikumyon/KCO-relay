@@ -1,14 +1,21 @@
-name: Build binaries
+name: Build release binaries
 
 on:
-  push:
-    branches: [main]
-    tags: ['v*']
-  pull_request:
+  release:
+    types: [published]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag (for example, v1.1.0)'
+        required: true
+        type: string
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.event.release.tag_name }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -30,8 +37,19 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       SLINT_NO_QT: '1'
+      RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ inputs.tag || github.event.release.tag_name }}
+          persist-credentials: false
+
+      - name: Verify release exists
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release view "$RELEASE_TAG"
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -62,10 +80,9 @@ jobs:
           mkdir -p dist
           tar -czf dist/kco-relay-${{ matrix.platform }}.tar.gz -C target/${{ matrix.target }}/release ${{ matrix.binary }} -C "$GITHUB_WORKSPACE" LICENSE
 
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: kco-relay-${{ matrix.platform }}
-          path: dist/*
-          if-no-files-found: error
-          retention-days: 30
+      - name: Attach binary to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "$RELEASE_TAG" dist/* --clobber
