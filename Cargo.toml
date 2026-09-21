@@ -1,0 +1,33 @@
+[package]
+name = "kco-relay"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+slint = { version = "1.8", features = ["raw-window-handle-06"] }
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.7", features = ["tokio"] }
+tower-http = { version = "0.5", features = ["cors"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"
+tray-item = "0.10"
+futures-util = "0.3"
+async-stream = "0.3"
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Threading",
+    "Win32_System_Registry",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Shell",
+] }
+
+[build-dependencies]
+slint-build = "1.8"
+winres = "0.1"

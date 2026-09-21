@@ -1,0 +1,14 @@
+/target/
+**/*.rs.bk
+*.pdb
+
+# IDE / Editor files
+.vscode/
+.idea/
+*.iml
+
+# OS generated files
+Thumbs.db
+[Dd]esktop.ini
+$RECYCLE.BIN/
+.DS_Store
