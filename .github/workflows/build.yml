@@ -1,0 +1,71 @@
+name: Build binaries
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x86_64
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+            binary: kco-relay.exe
+          - platform: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            binary: kco-relay
+    env:
+      CARGO_TERM_COLOR: always
+      SLINT_NO_QT: '1'
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libdbus-1-dev libfontconfig1-dev libfreetype6-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb-shape0-dev libxcb-xfixes0-dev libudev-dev libinput-dev libgbm-dev libegl1-mesa-dev
+
+      - name: Install Rust
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package Windows executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist
+          Compress-Archive -Path target/${{ matrix.target }}/release/${{ matrix.binary }},LICENSE -DestinationPath dist/kco-relay-${{ matrix.platform }}.zip
+
+      - name: Package Linux binary
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist
+          tar -czf dist/kco-relay-${{ matrix.platform }}.tar.gz -C target/${{ matrix.target }}/release ${{ matrix.binary }} -C "$GITHUB_WORKSPACE" LICENSE
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: kco-relay-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
