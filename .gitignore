@@ -2,6 +2,15 @@
 **/*.rs.bk
 *.pdb
 
+# Local application settings, runtime data, and diagnostic logs
+/settings.json
+/nowplaying.db
+/nowplaying.db-journal
+/nowplaying.db-wal
+/nowplaying.db-shm
+/logs/
+/kco-relay-resize.jsonl
+
 # IDE / Editor files
 .vscode/
 .idea/

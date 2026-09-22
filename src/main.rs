@@ -516,6 +516,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     append_log("サーバー待受中 (Port 5000 / 5001)");
 
+    #[cfg(windows)]
+    platform::install_resize_diagnostics(main_window.window())?;
     main_window.show()?;
     #[cfg(windows)]
     let corner_setup_timer = {
@@ -535,7 +537,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(false) => {} // ウィンドウ生成待ち。次のイベントループで再試行する。
                 Ok(true) => {
                     timer.stop();
-                    log_corners("ウィンドウ枠の角丸を適用しました");
                 }
                 Err(message) => {
                     timer.stop();

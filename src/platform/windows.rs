@@ -1,19 +1,25 @@
 use std::cell::Cell;
+#[path = "resize_diagnostics.rs"]
+mod resize_diagnostics;
+pub use resize_diagnostics::install as install_resize_diagnostics;
 use std::sync::Mutex;
 use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle};
 use tray_item::TrayItem;
-use windows_sys::Win32::Foundation::{BOOL, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{BOOL, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateRoundRectRgn, DeleteObject, SetWindowRgn,
+    CreateRoundRectRgn, DeleteObject, InvalidateRect, SetWindowRgn,
 };
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, FindWindowW, GetWindowRect, GetWindowTextW, IsIconic, IsZoomed,
+    EnumWindows, FindWindowW, GetCursorPos, GetWindowRect, GetWindowTextW, IsIconic, IsZoomed,
     SetForegroundWindow, ShowWindow, SW_HIDE, SW_RESTORE, SW_SHOW,
-    WM_DPICHANGED, WM_NCACTIVATE, WM_NCDESTROY, WM_NCPAINT, WM_SIZE,
+    HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT,
+    WM_DPICHANGED, WM_NCACTIVATE, WM_NCDESTROY, WM_NCHITTEST, WM_NCLBUTTONDOWN, WM_NCPAINT, WM_SIZE,
+    WM_PAINT, WM_SIZING, WM_WINDOWPOSCHANGING, WM_WINDOWPOSCHANGED,
+    WM_GETMINMAXINFO, MINMAXINFO,
 };
 
 static SINGLE_INSTANCE_MUTEX: Mutex<Option<HANDLE>> = Mutex::new(None);
@@ -24,6 +30,9 @@ const CORNER_SUBCLASS_ID: usize = 1;
 thread_local! {
     // SetWindowRgn が同期的に発生させるウィンドウメッセージによる再入を防ぐ。
     static UPDATING_WINDOW_REGION: Cell<bool> = const { Cell::new(false) };
+    static WINDOW_REGION_STATE: Cell<Option<(HWND, i32, i32, i32)>> = const { Cell::new(None) };
+    // リサイズ開始時の辺・角を、OS のドラッグループが終了するまで保持する。
+    static ACTIVE_RESIZE_HIT: Cell<Option<LRESULT>> = const { Cell::new(None) };
 }
 
 /// Windows の「アプリ モード」を読み、OS がダークテーマを選んでいるか返す。
@@ -121,6 +130,9 @@ fn find_main_window() -> HWND {
 
 /// DWM の角丸ヒントに依存せず、実際に描画できるウィンドウ領域を指定する。
 fn update_main_window_region(hwnd: HWND) -> Result<(), String> {
+    if ACTIVE_RESIZE_HIT.with(|active| active.get().is_some()) {
+        return Ok(());
+    }
     UPDATING_WINDOW_REGION.with(|updating| {
         if updating.replace(true) {
             return Ok(());
@@ -130,9 +142,15 @@ fn update_main_window_region(hwnd: HWND) -> Result<(), String> {
                 return Ok(());
             }
             if IsZoomed(hwnd) != 0 {
-                if SetWindowRgn(hwnd, 0, 1) == 0 {
+                let state = (hwnd, 0, 0, 0);
+                if WINDOW_REGION_STATE.with(|cached| cached.get() == Some(state)) {
+                    return Ok(());
+                }
+                if SetWindowRgn(hwnd, 0, 0) == 0 {
                     return Err("最大化時のウィンドウ領域の解除に失敗".into());
                 }
+                WINDOW_REGION_STATE.with(|cached| cached.set(Some(state)));
+                InvalidateRect(hwnd, std::ptr::null(), 0);
                 return Ok(());
             }
 
@@ -149,20 +167,88 @@ fn update_main_window_region(hwnd: HWND) -> Result<(), String> {
             let dpi = GetDpiForWindow(hwnd);
             let dpi = if dpi == 0 { 96 } else { dpi };
             let diameter = ((16 * dpi + 48) / 96) as i32;
+            let state = (hwnd, width, height, diameter);
+            if WINDOW_REGION_STATE.with(|cached| cached.get() == Some(state)) {
+                return Ok(());
+            }
             let region = CreateRoundRectRgn(0, 0, width, height, diameter, diameter);
             if region == 0 {
                 return Err("角丸ウィンドウ領域の作成に失敗".into());
             }
-            if SetWindowRgn(hwnd, region, 1) == 0 {
+            // 即時の追加描画を避け、Slint の次の描画にまとめる。
+            if SetWindowRgn(hwnd, region, 0) == 0 {
                 // 成功時は OS に所有権が移る。失敗時だけここで解放する。
                 DeleteObject(region);
                 return Err("角丸ウィンドウ領域の設定に失敗".into());
             }
+            WINDOW_REGION_STATE.with(|cached| cached.set(Some(state)));
+            InvalidateRect(hwnd, std::ptr::null(), 0);
             Ok(())
         })();
         updating.set(false);
         result
     })
+}
+
+fn resize_hit_test(rect: &RECT, lparam: LPARAM, dpi: u32) -> Option<LRESULT> {
+    // 画面の左・上にあるモニターでは座標が負になるため、符号付きで取り出す。
+    let x = (lparam as u16 as i16) as i32;
+    let y = ((lparam >> 16) as u16 as i16) as i32;
+    if x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom {
+        return None;
+    }
+    let dpi = if dpi == 0 { 96 } else { dpi };
+    let border = ((6 * dpi + 48) / 96) as i32;
+    let left = x < rect.left + border;
+    let right = x >= rect.right - border;
+    let top = y < rect.top + border;
+    let bottom = y >= rect.bottom - border;
+    let hit = match (left, right, top, bottom) {
+        (true, _, true, _) => HTTOPLEFT,
+        (_, true, true, _) => HTTOPRIGHT,
+        (true, _, _, true) => HTBOTTOMLEFT,
+        (_, true, _, true) => HTBOTTOMRIGHT,
+        (true, _, _, _) => HTLEFT,
+        (_, true, _, _) => HTRIGHT,
+        (_, _, true, _) => HTTOP,
+        (_, _, _, true) => HTBOTTOM,
+        _ => return None,
+    };
+    Some(hit as LRESULT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn point(x: i16, y: i16) -> LPARAM {
+        ((x as u16 as u32) | ((y as u16 as u32) << 16)) as LPARAM
+    }
+
+    #[test]
+    fn resize_edges_and_corners_on_negative_coordinate_monitor() {
+        let rect = RECT { left: -600, top: -600, right: -100, bottom: -100 };
+        for (x, y, expected) in [
+            (-598, -598, HTTOPLEFT), (-102, -598, HTTOPRIGHT),
+            (-598, -102, HTBOTTOMLEFT), (-102, -102, HTBOTTOMRIGHT),
+            (-598, -350, HTLEFT), (-102, -350, HTRIGHT),
+            (-350, -598, HTTOP), (-350, -102, HTBOTTOM),
+        ] {
+            assert_eq!(resize_hit_test(&rect, point(x, y), 96), Some(expected as LRESULT));
+        }
+        for (x, y) in [(-350, -350), (-601, -350), (-100, -350), (-350, -601), (-350, -100)] {
+            assert_eq!(resize_hit_test(&rect, point(x, y), 96), None);
+        }
+    }
+
+    #[test]
+    fn resize_border_scales_with_dpi() {
+        let rect = RECT { left: 0, top: 0, right: 1000, bottom: 1000 };
+        assert_eq!(resize_hit_test(&rect, point(8, 500), 96), None);
+        assert_eq!(resize_hit_test(&rect, point(8, 500), 192), Some(HTLEFT as LRESULT));
+        assert_eq!(resize_hit_test(&rect, point(12, 500), 192), None);
+        assert_eq!(resize_hit_test(&rect, point(5, 500), 0), Some(HTLEFT as LRESULT));
+    }
 }
 
 unsafe extern "system" fn window_corners_proc(
@@ -173,6 +259,44 @@ unsafe extern "system" fn window_corners_proc(
     subclass_id: usize,
     _reference_data: usize,
 ) -> LRESULT {
+    if message == WM_NCLBUTTONDOWN
+        && matches!(wparam as u32, HTLEFT | HTRIGHT | HTTOP | HTBOTTOM
+            | HTTOPLEFT | HTTOPRIGHT | HTBOTTOMLEFT | HTBOTTOMRIGHT)
+        && IsZoomed(hwnd) == 0
+    {
+        ACTIVE_RESIZE_HIT.with(|active| active.set(Some(wparam as LRESULT)));
+        // サイズごとの SetWindowRgn は位置変更メッセージを再発生させる。
+        // ドラッグ中は切り抜きを解除し、OS のサイズ変更・描画だけに任せる。
+        if SetWindowRgn(hwnd, 0, 0) == 0 {
+            crate::append_log_to_file("リサイズ開始時のウィンドウ領域の解除に失敗");
+        }
+        WINDOW_REGION_STATE.with(|cached| cached.set(None));
+        InvalidateRect(hwnd, std::ptr::null(), 0);
+
+        // ボタンを離す・Escでキャンセルする・キャプチャを失うまでOSが処理する。
+        resize_diagnostics::begin();
+        let result = DefSubclassProc(hwnd, message, wparam, lparam);
+        resize_diagnostics::finish();
+        ACTIVE_RESIZE_HIT.with(|active| active.set(None));
+        if let Err(error) = update_main_window_region(hwnd) {
+            crate::append_log_to_file(&error);
+        }
+        return result;
+    }
+    if message == WM_NCHITTEST {
+        if let Some(hit) = ACTIVE_RESIZE_HIT.with(|active| active.get()) {
+            return hit;
+        }
+    }
+    if message == WM_NCHITTEST && IsZoomed(hwnd) == 0 && IsIconic(hwnd) == 0 {
+        let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        if GetWindowRect(hwnd, &mut rect) != 0 {
+            if let Some(hit) = resize_hit_test(&rect, lparam, GetDpiForWindow(hwnd)) {
+                return hit;
+            }
+        }
+    }
+
     // 本体の枠とタイトルバーは Slint が描画する。角丸領域を設定した
     // ウィンドウに標準の非クライアント描画が走ると、白い枠が重なる。
     if message == WM_NCPAINT {
@@ -185,12 +309,35 @@ unsafe extern "system" fn window_corners_proc(
     }
 
     if message == WM_NCDESTROY {
+        WINDOW_REGION_STATE.with(|cached| cached.set(None));
         RemoveWindowSubclass(hwnd, Some(window_corners_proc), subclass_id);
         return DefSubclassProc(hwnd, message, wparam, lparam);
     }
 
     // Slint / winit の処理後に、新しいサイズ・DPI・最大化状態を取得する。
+    let sample = match message {
+        WM_SIZE => Some("wm_size"),
+        WM_SIZING => Some("wm_sizing"),
+        WM_PAINT => Some("wm_paint"),
+        WM_WINDOWPOSCHANGING => Some("wm_windowposchanging"),
+        WM_WINDOWPOSCHANGED => Some("wm_windowposchanged"),
+        WM_GETMINMAXINFO => Some("wm_getminmaxinfo"),
+        _ => None,
+    }.and_then(|name| resize_diagnostics::timestamp().map(|start| (name, start)));
     let result = DefSubclassProc(hwnd, message, wparam, lparam);
+    if let Some((name, start)) = sample {
+        let geometry = if message == WM_SIZING {
+            let rect = &*(lparam as *const RECT);
+            let mut cursor = POINT { x: i32::MIN, y: i32::MIN };
+            GetCursorPos(&mut cursor);
+            Some([rect.left, rect.top, rect.right, rect.bottom, cursor.x, cursor.y])
+        } else if message == WM_GETMINMAXINFO {
+            let limits = &*(lparam as *const MINMAXINFO);
+            Some([limits.ptMinTrackSize.x, limits.ptMinTrackSize.y,
+                limits.ptMaxTrackSize.x, limits.ptMaxTrackSize.y, 0, 0])
+        } else { None };
+        resize_diagnostics::record_geometry(name, start, geometry);
+    }
     if message == WM_SIZE || message == WM_DPICHANGED {
         if let Err(error) = update_main_window_region(hwnd) {
             crate::append_log_to_file(&error);

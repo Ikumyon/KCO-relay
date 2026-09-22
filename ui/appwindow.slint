@@ -482,7 +482,7 @@ export component AppWindow inherits Window {
                             clicked => { root.minimize_window(); }
                         }
                         CaptionButton {
-                            icon: @image-url("../icons/expand.svg");
+                            icon: root.maximized ? @image-url("../icons/minimize-2.svg") : @image-url("../icons/expand.svg");
                             clicked => { root.toggle_maximize(); }
                         }
                         CaptionButton {
